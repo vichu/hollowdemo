@@ -1,0 +1,86 @@
+/* Custom styling for ACM Fremont presentation */
+
+/* Set Verdana as the main font */
+* {
+  font-family: Verdana, Geneva, sans-serif !important;
+}
+
+/* Apply ACM background to all slides */
+.slidev-layout {
+  background-image: url('/acm-fremont-background.svg') !important;
+  background-size: cover !important;
+  background-position: center !important;
+  background-repeat: no-repeat !important;
+  background-color: white !important;
+}
+
+/* Remove any overlays that create tint */
+.slidev-layout::before,
+.slidev-layout::after {
+  content: none !important;
+  display: none !important;
+}
+
+/* Ensure slide container doesn't block background */
+.slide-container {
+  background: transparent !important;
+}
+
+/* Make sure content area is transparent to show background */
+#slide-content {
+  background: transparent !important;
+}
+
+/* Force light mode - no dark overlays */
+html {
+  color-scheme: light !important;
+}
+
+html, body, #app {
+  background: white !important;
+}
+
+/* Title colors - use ACM blue */
+h1 {
+  color: #0182ac !important;
+  background: none !important;
+  -webkit-text-fill-color: #0182ac !important;
+  -moz-text-fill-color: #0182ac !important;
+}
+
+/* All other text black */
+h2, h3, h4, h5, h6, p, li, td, th, span, div, a, code, pre {
+  color: #000000 !important;
+}
+
+/* Code blocks - keep readable */
+pre code {
+  color: #000000 !important;
+}
+
+/* Ensure links are visible */
+a {
+  color: #0182ac !important;
+  text-decoration: underline;
+}
+
+a:hover {
+  color: #025c7a !important;
+}
+
+/* Blockquotes (for the Phil Karlton quote) */
+blockquote {
+  color: #000000 !important;
+  border-left-color: #0182ac !important;
+}
+
+/* Code inline */
+:not(pre) > code {
+  color: #000000 !important;
+  background-color: rgba(1, 130, 172, 0.1) !important;
+}
+
+/* Ensure background image shows through */
+.slides-overview {
+  background-color: transparent !important;
+}
