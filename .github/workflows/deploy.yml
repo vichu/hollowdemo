@@ -34,7 +34,7 @@ jobs:
 
       - name: Build
         working-directory: ./presentation
-        run: nr build --base /${{github.event.repository.name}}/presentation/
+        run: nr build --base /${{github.event.repository.name}}/
 
       - name: Setup Pages
         uses: actions/configure-pages@v4
