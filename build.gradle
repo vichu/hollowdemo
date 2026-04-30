@@ -32,7 +32,8 @@ dependencies {
     implementation 'org.jetbrains.kotlin:kotlin-reflect'
 
     // Hollow for versioned dataset distribution
-    implementation 'com.netflix.hollow:hollow:7.1.0'
+    implementation 'com.netflix.hollow:hollow:7.14.39'
+    implementation 'io.github.vichu.hollow:hollow-aws:0.1.0'
 
     developmentOnly 'org.springframework.boot:spring-boot-devtools'
     annotationProcessor 'org.springframework.boot:spring-boot-configuration-processor'

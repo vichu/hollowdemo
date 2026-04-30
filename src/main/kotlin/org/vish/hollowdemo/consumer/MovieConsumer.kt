@@ -1,30 +1,27 @@
 package org.vish.hollowdemo.consumer
 
 import com.netflix.hollow.api.consumer.HollowConsumer
-import com.netflix.hollow.api.consumer.fs.HollowFilesystemAnnouncementWatcher
-import com.netflix.hollow.api.consumer.fs.HollowFilesystemBlobRetriever
 import com.netflix.hollow.api.consumer.index.HashIndex
 import com.netflix.hollow.api.consumer.index.UniqueKeyIndex
+import io.github.vichu.hollow.aws.config.HollowAwsConfig
+import io.github.vichu.hollow.aws.retriever.HollowS3BlobRetriever
+import io.github.vichu.hollow.aws.watcher.HollowDynamoDBAnnouncementWatcher
 import jakarta.annotation.PostConstruct
 import org.slf4j.LoggerFactory
 import org.springframework.context.annotation.Profile
 import org.springframework.stereotype.Service
 import org.vish.hollowdemo.api.MovieAPI
-import java.io.File
 import java.time.LocalDateTime
 
 @Service
 @Profile("consumer")
 class MovieConsumer {
     private val logger = LoggerFactory.getLogger(MovieConsumer::class.java)
-    private val hollowDataPath = File(System.getenv("HOLLOW_DATA_PATH") ?: "./hollow-data")
     private lateinit var consumer: HollowConsumer
     private lateinit var api: MovieAPI
+    private lateinit var awsConfig: HollowAwsConfig
 
-    // Primary key index for fast O(1) ID lookups
     private lateinit var movieIndex: UniqueKeyIndex<org.vish.hollowdemo.api.Movie, Long>
-
-    // Secondary hash index on genre (non-primary key field)
     private lateinit var genreIndex: HashIndex<org.vish.hollowdemo.api.Movie, GenreQuery>
 
     private var lastUpdateTime: LocalDateTime? = null
@@ -34,10 +31,12 @@ class MovieConsumer {
     fun initialize() {
         logger.info("========================================")
         logger.info("Initializing MovieConsumer...")
-        logger.info("Watching for data at: ${hollowDataPath.absolutePath}")
 
-        val blobRetriever = HollowFilesystemBlobRetriever(hollowDataPath.toPath())
-        val announcementWatcher = HollowFilesystemAnnouncementWatcher(hollowDataPath.toPath())
+        awsConfig = HollowAwsConfig.builder().build()
+        logger.info("Watching S3 bucket: ${awsConfig.bucket}, DynamoDB table: ${awsConfig.dynamoDbTable}")
+
+        val blobRetriever = HollowS3BlobRetriever.create(awsConfig)
+        val announcementWatcher = HollowDynamoDBAnnouncementWatcher.create(awsConfig)
 
         consumer = HollowConsumer.withBlobRetriever(blobRetriever)
             .withAnnouncementWatcher(announcementWatcher)
@@ -78,17 +77,12 @@ class MovieConsumer {
             })
             .build()
 
-        // Trigger initial load
         consumer.triggerRefresh()
 
-        // Get the generated API
         api = consumer.getAPI(MovieAPI::class.java)
 
-        // Create primary key index for fast O(1) ID lookups
         movieIndex = org.vish.hollowdemo.api.Movie.uniqueIndex(consumer)
 
-        // Create hash index on genre for efficient genre-based queries
-        // This demonstrates indexing on a non-primary key field
         genreIndex = HashIndex.from(consumer, org.vish.hollowdemo.api.Movie::class.java)
             .usingBean(GenreQuery::class.java)
         consumer.addRefreshListener(genreIndex)
@@ -130,7 +124,6 @@ class MovieConsumer {
     }
 
     fun getMovieById(id: Long): org.vish.hollowdemo.model.Movie? {
-        // Use the primary key index for fast O(1) lookup
         val hollowMovie = movieIndex.findMatch(id) ?: return null
         return convertToModelMovie(hollowMovie)
     }
@@ -142,10 +135,7 @@ class MovieConsumer {
     }
 
     fun getMoviesByGenre(genre: String): List<org.vish.hollowdemo.model.Movie> {
-        // Use the hash index for efficient genre lookup
-        // Create query bean and use index instead of scanning all movies
         val query = GenreQuery(genre)
-
         return genreIndex.findMatches(query).map { convertToModelMovie(it) }.toList()
     }
 
@@ -160,7 +150,9 @@ class MovieConsumer {
             "updateCount" to updateCount,
             "genreBreakdown" to genreCounts,
             "averageRating" to String.format("%.2f", movies.map { it.rating }.average()),
-            "dataPath" to hollowDataPath.absolutePath
+            "s3Bucket" to awsConfig.bucket,
+            "dynamoDbTable" to awsConfig.dynamoDbTable,
+            "datasetId" to awsConfig.datasetId
         )
     }
 }
