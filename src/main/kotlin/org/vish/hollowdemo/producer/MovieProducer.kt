@@ -1,15 +1,15 @@
 package org.vish.hollowdemo.producer
 
 import com.netflix.hollow.api.producer.HollowProducer
-import com.netflix.hollow.api.producer.fs.HollowFilesystemAnnouncer
-import com.netflix.hollow.api.producer.fs.HollowFilesystemPublisher
+import io.github.vichu.hollow.aws.announcer.HollowDynamoDBAnnouncer
+import io.github.vichu.hollow.aws.config.HollowAwsConfig
+import io.github.vichu.hollow.aws.publisher.HollowS3Publisher
 import jakarta.annotation.PostConstruct
 import org.slf4j.LoggerFactory
 import org.springframework.context.annotation.Profile
 import org.springframework.scheduling.annotation.Scheduled
 import org.springframework.stereotype.Service
 import org.vish.hollowdemo.model.Movie
-import java.io.File
 import java.time.LocalDateTime
 
 @Service
@@ -18,25 +18,21 @@ class MovieProducer(
     private val movieDataGenerator: MovieDataGenerator
 ) {
     private val logger = LoggerFactory.getLogger(MovieProducer::class.java)
-    private val hollowDataPath = File(System.getenv("HOLLOW_DATA_PATH") ?: "./hollow-data")
     private lateinit var producer: HollowProducer
+    private lateinit var awsConfig: HollowAwsConfig
     private var currentMovies: List<Movie> = emptyList()
     private var cycleCount = 0L
 
     @PostConstruct
     fun initialize() {
-        // Ensure hollow data directory exists
-        hollowDataPath.mkdirs()
+        awsConfig = HollowAwsConfig.builder().build()
 
-        // Initialize Hollow producer with filesystem publisher
-        producer = HollowProducer.withPublisher(HollowFilesystemPublisher(hollowDataPath.toPath()))
-            .withAnnouncer(HollowFilesystemAnnouncer(hollowDataPath.toPath()))
+        producer = HollowProducer.withPublisher(HollowS3Publisher.create(awsConfig))
+            .withAnnouncer(HollowDynamoDBAnnouncer.create(awsConfig))
             .build()
-        
 
-        logger.info("MovieProducer initialized. Data will be published to: ${hollowDataPath.absolutePath}")
+        logger.info("MovieProducer initialized. Publishing to S3 bucket: ${awsConfig.bucket}, DynamoDB table: ${awsConfig.dynamoDbTable}")
 
-        // Run first cycle immediately
         runProductionCycle()
     }
 
@@ -49,10 +45,9 @@ class MovieProducer(
             logger.info("========================================")
             logger.info("Starting producer cycle #$cycleCount at ${LocalDateTime.now()}")
 
-            // Generate or update dataset
             currentMovies = if (currentMovies.isEmpty()) {
                 logger.info("Generating initial dataset...")
-                movieDataGenerator.generateInitialDataset()  // Uses default: 50,000
+                movieDataGenerator.generateInitialDataset()
             } else {
                 logger.info("Generating updated dataset...")
                 movieDataGenerator.generateUpdatedDataset(currentMovies)
@@ -60,7 +55,6 @@ class MovieProducer(
 
             logger.info("Dataset prepared: ${currentMovies.size} movies")
 
-            // Run Hollow cycle - this automatically calculates diffs and creates deltas
             producer.runCycle { writeState ->
                 currentMovies.forEach { movie ->
                     writeState.add(movie)
@@ -69,8 +63,7 @@ class MovieProducer(
 
             val duration = System.currentTimeMillis() - startTime
             logger.info("Producer cycle #$cycleCount completed in ${duration}ms")
-            logger.info("Published ${currentMovies.size} movies to Hollow")
-            logger.info("Snapshot and delta available at: ${hollowDataPath.absolutePath}")
+            logger.info("Published ${currentMovies.size} movies to s3://${awsConfig.bucket}/${awsConfig.keyPrefix}")
             logger.info("========================================")
 
         } catch (e: Exception) {
@@ -82,7 +75,9 @@ class MovieProducer(
         return mapOf(
             "cycleCount" to cycleCount,
             "movieCount" to currentMovies.size,
-            "dataPath" to hollowDataPath.absolutePath
+            "s3Bucket" to awsConfig.bucket,
+            "dynamoDbTable" to awsConfig.dynamoDbTable,
+            "datasetId" to awsConfig.datasetId
         )
     }
 

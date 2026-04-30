@@ -44,3 +44,4 @@ hollow-data/
 *.log
 .DS_Store
 .claude/
+.env

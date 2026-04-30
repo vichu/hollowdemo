@@ -2,48 +2,153 @@
 
 Demo application showcasing [Netflix Hollow](https://hollow.how), an open-source library that enables efficient distribution of GB-scale datasets using a Git-like snapshot + delta model.
 
-## 🚀 Quick Start
+This demo uses real AWS infrastructure (S3 + DynamoDB) via the [hollow-aws](https://github.com/vichu/hollow-infra-adapters) library.
 
-```bash
-# Start with Docker Compose (recommended)
-docker compose up --build
-
-# Access the APIs
-curl http://localhost:9080/producer/stats  # Producer
-curl http://localhost:9081/movies/stats    # Consumer
-
-# Stop and cleanup
-docker compose down -v
-```
+---
 
 ## 📋 What This Demo Shows
 
-1. **Producer**: Generates rich movie catalog data (50,000 movies with full metadata) and publishes versioned snapshots + deltas
-2. **Efficient Updates**: Snapshots are tens of MBs, but deltas are only a few hundred KB - showcasing massive savings
-3. **Auto-Scheduling**: Producer runs every 7 minutes, simulating real-world updates
-4. **Zero-Copy Updates**: In-place delta application with no memory spikes
+1. **Producer**: Generates a rich movie catalog (50,000 movies) and publishes versioned snapshots + deltas to S3
+2. **Efficient Updates**: Snapshots are ~10 MB, but deltas are only ~650 KB — showcasing massive transfer savings
+3. **AWS-backed distribution**: Producer announces versions via DynamoDB; consumers poll and auto-apply deltas
+4. **Auto-Scheduling**: Producer runs every 7 minutes, simulating real-world updates
 5. **Force Publish**: Manual trigger endpoint to publish on demand without waiting
+
+---
+
+## 🏗️ Prerequisites
+
+- Docker and Docker Compose
+- [Terraform](https://developer.hashicorp.com/terraform/install) >= 1.0
+- AWS account with an IAM user (not root) and `AdministratorAccess` policy
+- AWS CLI configured: `aws configure --profile vish-personal-aws`
+
+---
+
+## 🚀 Demo Runbook
+
+### Step 1 — Provision AWS Infrastructure
+
+From the [hollow-infra-adapters](https://github.com/vichu/hollow-infra-adapters) repo:
+
+```bash
+cd /path/to/hollow-infra-adapters/terraform/aws
+
+cat > terraform.tfvars <<EOF
+namespace   = "hollow"
+environment = "demo"
+region      = "us-east-1"
+
+tags = {
+  Project = "hollowdemo"
+  Owner   = "vish"
+}
+EOF
+
+terraform init && terraform apply
+```
+
+This creates 11 resources in ~60 seconds:
+- **S3 bucket**: `hollow-demo-blobs` — stores snapshots and deltas
+- **DynamoDB table**: `hollow-demo-announcements` — stores latest version per dataset
+- **IAM roles**: `hollow-demo-hollow-producer` and `hollow-demo-hollow-consumer`
+
+### Step 2 — Configure Credentials
+
+Create a `.env` file in this project (gitignored):
+
+```bash
+cat > .env <<EOF
+HOLLOW_AWS_REGION=us-east-1
+HOLLOW_AWS_BUCKET=hollow-demo-blobs
+HOLLOW_AWS_DYNAMODB_TABLE=hollow-demo-announcements
+HOLLOW_AWS_DATASET_ID=movies
+AWS_ACCESS_KEY_ID=<your-iam-user-access-key>
+AWS_SECRET_ACCESS_KEY=<your-iam-user-secret-key>
+EOF
+```
+
+### Step 3 — Start the Demo
+
+```bash
+./demo-reset.sh
+```
+
+This builds the containers and starts both producer and consumer fresh.
+
+### Step 4 — Access the APIs
+
+**Producer (port 9080):**
+```bash
+curl http://localhost:9080/producer/stats
+curl -X POST http://localhost:9080/producer/publish   # Force a new cycle
+```
+
+**Consumer (port 9081):**
+```bash
+curl http://localhost:9081/movies
+curl http://localhost:9081/movies/1
+curl http://localhost:9081/movies/search?title=Glass
+curl http://localhost:9081/movies/genre/Action
+curl http://localhost:9081/movies/stats
+```
+
+### Step 5 — Verify in AWS
+
+```bash
+# S3 — see snapshots and deltas
+aws s3 ls s3://hollow-demo-blobs/movies/ --human-readable
+
+# DynamoDB — see the latest announced version
+aws dynamodb get-item \
+  --table-name hollow-demo-announcements \
+  --key '{"dataset_id": {"S": "movies"}}' \
+  --region us-east-1
+```
+
+---
+
+## 🔄 Resetting Between Demo Runs
+
+To start completely fresh while keeping AWS infrastructure intact:
+
+```bash
+./demo-reset.sh
+```
+
+This stops containers, wipes S3 blobs and the DynamoDB version record, then rebuilds and restarts everything.
+
+---
+
+## 🧹 Full Teardown (After Demo)
+
+To tear down everything including AWS infrastructure:
+
+```bash
+./demo-reset.sh --teardown
+```
+
+This stops containers, then destroys all 11 Terraform resources.
+
+> **Note on S3 versioning**: The Terraform module enables S3 bucket versioning, which means `aws s3 rm` only creates delete markers — it does not remove the underlying object versions. Terraform will refuse to delete a bucket that still has versions in it. The `--teardown` flag handles this automatically: it uses `s3api delete-objects` to purge all object versions and delete markers before handing off to `terraform destroy`.
+
+### Summary of `demo-reset.sh` flags
+
+| Command | What it does |
+|---|---|
+| `./demo-reset.sh` | Stop → clear data → rebuild → start |
+| `./demo-reset.sh --clean-only` | Stop → clear data (don't restart) |
+| `./demo-reset.sh --teardown` | Stop → purge all S3 versions → destroy Terraform infra |
+
+---
 
 ## 🎬 Dataset
 
-The demo generates 50,000 Netflix movies with rich metadata including:
-- *Glass Onion: A Knives Out Mystery*
-- *The Irishman*
-- *Don't Look Up*
-- *The Kissing Booth 3: Ultimate Kissing Championship*
-- *Army of Slightly Annoyed People*
-- *Glass Onion 2: The Avocado*
+The demo generates 50,000 movies with rich metadata including title, genre, rating, release year, duration, description, director, cast, writers, production company, budget, box office, tags, age rating, and awards.
 
-**Rich Movie Metadata:**
-- Title, genre, rating, release year, duration
-- Full description (genre-specific templates)
-- Director and cast (3-8 actors)
-- Writers, production company, country, language
-- Budget and box office revenue
-- Tags, age rating, and awards
-- Lists of cast members, writers, and tags
+Each cycle simulates real-world changes: ~1.5% removals, ~4% updates (rating changes), ~5% new additions — net growth of ~3.4% per cycle.
 
-Each cycle simulates real-world changes: ~2% removals, ~4% updates (rating changes), ~3% new additions.
+---
 
 ## 🏗️ Project Structure
 
@@ -53,7 +158,6 @@ src/main/
 │   ├── api/                        # Generated Hollow Consumer API (do not edit!)
 │   │   ├── MovieAPI.java           # Main API class
 │   │   ├── Movie.java              # Type-safe Movie wrapper
-│   │   ├── HString.java            # String wrapper
 │   │   └── ...                     # Other generated classes
 │   └── codegen/
 │       └── GenerateMovieAPI.java   # API generator utility
@@ -61,535 +165,111 @@ src/main/
 └── kotlin/org/vish/hollowdemo/
     ├── model/
     │   └── Movie.kt                # Data model with @HollowPrimaryKey
-    ├── producer/                   # Producer side (publishes snapshots)
-    │   ├── MovieDataGenerator.kt   # Generates sample Netflix movie data
-    │   └── MovieProducer.kt        # Hollow producer - creates snapshots & deltas
-    ├── consumer/                   # Consumer side (loads snapshots)
-    │   ├── MovieConsumer.kt        # Hollow consumer - loads and queries data
-    │   └── MovieController.kt      # REST API endpoints
+    ├── producer/
+    │   ├── MovieDataGenerator.kt   # Generates sample movie data
+    │   ├── MovieProducer.kt        # Publishes snapshots/deltas to S3
+    │   └── ProducerController.kt   # REST endpoints for producer
+    ├── consumer/
+    │   ├── MovieConsumer.kt        # Loads from S3, watches DynamoDB for updates
+    │   ├── MovieController.kt      # REST API endpoints
+    │   └── GenreQuery.kt           # Hash index query bean
     └── HollowdemoApplication.kt    # Spring Boot entry point
-
-hollow-data/                        # Published Hollow blobs (created on run)
-├── snapshot-*                      # Full dataset snapshots (8.5KB)
-├── delta-*                         # Incremental changes (502 bytes!)
-├── reversedelta-*                  # Rollback support
-└── announced.version               # Current version pointer
-```
-
-## 🚀 Running the Demo
-
-### Method 1: Docker Compose (Recommended)
-
-The easiest way to run the demo is with Docker Compose, which handles all dependencies and runs producer and consumer as separate containers.
-
-#### Prerequisites
-- Docker and Docker Compose
-
-#### Start the Services
-
-```bash
-# Build and start both producer and consumer
-docker compose up --build
-```
-
-This will:
-- Build the application with Java 21 and Gradle
-- Start the **producer** on port **9080**
-- Start the **consumer** on port **9081**
-- Create a shared `./hollow-data` directory for data synchronization
-- Both containers share the same local directory for Hollow data files
-
-#### Access the APIs
-
-**Producer API (port 9080):**
-```bash
-# Get producer stats
-curl http://localhost:9080/producer/stats
-
-# Force publish a new version
-curl -X POST http://localhost:9080/producer/publish
-```
-
-**Consumer API (port 9081):**
-```bash
-# Get all movies
-curl http://localhost:9081/movies
-
-# Get movie by ID
-curl http://localhost:9081/movies/1
-
-# Search by title
-curl http://localhost:9081/movies/search?title=Glass
-
-# Get movies by genre
-curl http://localhost:9081/movies/genre/Action
-
-# Get consumer stats
-curl http://localhost:9081/movies/stats
-```
-
-#### Monitor Logs
-
-```bash
-# View all logs
-docker compose logs -f
-
-# View producer logs only
-docker compose logs -f producer
-
-# View consumer logs only
-docker compose logs -f consumer
-```
-
-#### Stop the Services
-
-```bash
-# Stop and remove containers (data persists in ./hollow-data)
-docker compose down
-
-# Stop and remove containers + delete local data
-docker compose down && rm -rf ./hollow-data
 ```
 
 ---
 
-### Method 2: Local Development
-
-For local development and debugging, you can run the services directly with Gradle.
-
-#### Prerequisites
-- Java 21
-- Gradle 8.14.3 (or use included wrapper)
-
-#### Step 1: Generate Hollow Consumer API
-
-Before running the demo, generate the type-safe consumer API:
-
-```bash
-./gradlew generateHollowAPI
-```
-
-This creates Java classes in `src/main/java/org/vish/hollowdemo/api/` including:
-- `MovieAPI.java` - Main API for accessing movies
-- `Movie.java` - Type-safe movie wrapper with getters
-- `HString.java` - String wrapper
-- Primary key index support
-
-**Note**: In production, consumers typically live in a separate project and use the generated API as a dependency.
-
-### Step 2: Build the Project
-
-```bash
-./gradlew clean build -x test
-```
-
-### Step 3: Run Producer & Consumer
-
-#### Option 1: Separate Processes (Recommended for Demo)
-
-Run producer and consumer in **separate terminals** to clearly show the producer-consumer pattern:
-
-**Terminal 1 - Producer:**
-```bash
-./gradlew bootRun --args='--spring.profiles.active=producer'
-```
-
-Wait for the producer to create the initial snapshot (~5 seconds), then in a new terminal:
-
-**Terminal 2 - Consumer:**
-```bash
-./gradlew bootRun --args='--spring.profiles.active=consumer' --args='--server.port=8081'
-```
-
-The consumer will:
-- Load the snapshot created by the producer
-- Start watching for updates
-- Auto-apply deltas when the producer publishes new versions
-- Expose REST API on port 8081
-
-### Option 2: Combined Mode
-
-Run both producer and consumer in a single process:
-
-```bash
-./gradlew bootRun --args='--spring.profiles.active=producer,consumer'
-```
-
-### What to Observe
-
-**Producer Terminal - Cycle #1:**
-```
-[INFO] MovieProducer initialized. Data will be published to: ./hollow-data
-[INFO] Starting producer cycle #1
-[INFO] Generating initial dataset...
-[INFO] Dataset prepared: 100 movies
-[INFO] Producer cycle #1 completed in 22ms
-[INFO] Published 100 movies to Hollow
-```
-
-**Consumer Terminal - Initial Load:**
-```
-[INFO] Initializing MovieConsumer...
-[INFO] Watching for data at: ./hollow-data
-[INFO] ✅ Update successful: v0 -> v20251109223219001
-[INFO]    Now serving 100 movies (update #1)
-[INFO] MovieConsumer initialized successfully
-```
-
-**Producer Terminal - Cycle #2 (after 2 minutes):**
-```
-[INFO] Starting producer cycle #2
-[INFO] Generating updated dataset...
-[INFO] Dataset prepared: 103 movies
-[INFO] Producer cycle #2 completed in 25ms
-```
-
-**Consumer Terminal - Auto Delta Update:**
-```
-[INFO] 🔄 Update started: v20251109223219001 -> v20251109223419002
-[INFO] ✅ Update successful: v20251109223219001 -> v20251109223419002
-[INFO]    Now serving 103 movies (update #2)
-```
-
-### Query the Consumer API
-
-Once the consumer is running, query it via REST (port 8081):
-
-```bash
-# Get all movies
-curl http://localhost:8081/movies
-
-# Get movie by ID
-curl http://localhost:8081/movies/1
-
-# Search by title
-curl http://localhost:8081/movies/search?title=Glass
-
-# Get movies by genre
-curl http://localhost:8081/movies/genre/Action
-
-# Get consumer stats
-curl http://localhost:8081/movies/stats
-```
-
-**Sample Response (stats endpoint):**
-```json
-{
-  "totalMovies": 103,
-  "currentVersion": 20251109223419002,
-  "lastUpdateTime": "2025-11-09T14:34:19.560",
-  "updateCount": 2,
-  "genreBreakdown": {
-    "Action": 15,
-    "Comedy": 12,
-    "Drama": 18,
-    ...
-  },
-  "averageRating": "7.42"
-}
-```
-
-### Verify Snapshot & Delta Files
-
-```bash
-ls -lh ./hollow-data/
-
-# You should see:
-# snapshot-20251109223219001    (8.5K)  - First full snapshot
-# snapshot-20251109223419002    (8.5K)  - Second snapshot (for new consumers)
-# delta-20251109223219001-*     (502B)  - Delta between versions!
-```
-
-## 📦 Why is the Delta 17x Smaller?
-
-**Snapshot (8.5 KB)** contains:
-- All 100 movies
-- Complete data for each: id, title, genre, rating, releaseYear, duration
-- Efficient binary encoding (not JSON)
-- Compressed format
-
-**Delta (502 bytes)** contains only:
-- **Removed**: 2 movies → Just their ordinal references
-- **Added**: 3 new movies → Full data only for these
-- **Modified**: 4 movies → Only changed fields (e.g., rating: 7.5 → 8.1)
-- **Unchanged**: 95 movies → **Not included at all!**
-
-### The Math
-
-In a typical update cycle:
-- **2% removed** (2 movies) = ~20 bytes (ordinal references)
-- **4% modified** (4 movies) = ~200 bytes (only changed fields)
-- **3% added** (3 movies) = ~250 bytes (new movie data)
-- **Overhead** = ~32 bytes (version metadata, checksums)
-
-**Total**: ~502 bytes vs 8,500 bytes = **~17x smaller**
-
-### Why This Matters at Scale
-
-For a real-world 2 GB product catalog with 10M products:
-
-| Update Type | Traditional | Hollow Delta |
-|-------------|-------------|--------------|
-| Full reload | 2 GB | - |
-| 0.18% change | 2 GB | ~4 MB |
-| Network transfer | 2 GB per node | 4 MB per node |
-| Memory spike | 4 GB (2x) | 2.01 GB (no spike) |
-| Update time | 90 seconds | 3 seconds |
-
-**For 10 application instances**: 20 GB transferred → 40 MB transferred (500x reduction!)
-
-### Hollow's Encoding Efficiency
-
-1. **Ordinal-based references**: Records referenced by integer ordinals, not IDs
-2. **Type-specific encoding**: Optimized binary format per field type
-3. **Shared string pooling**: Common strings stored once and referenced
-4. **Delta transitions**: Only transmits state changes between versions
-5. **No serialization overhead**: Direct memory-mapped format
-
-This is why Hollow excels at GB-scale datasets where even "small" changes become expensive with traditional approaches.
-
 ## 🎯 Key Hollow Concepts Demonstrated
 
 ### 1. Producer Pattern
-The `MovieProducer` runs independently from consumers:
+
+The producer adds all movies every cycle — Hollow automatically calculates the diff:
+
 ```kotlin
 producer.runCycle { writeState ->
     currentMovies.forEach { movie ->
         writeState.add(movie)  // Add ALL movies (not just changes)
     }
 }
-// Hollow automatically calculates diffs and creates deltas
+// Hollow diffs against the previous state and creates a delta automatically
 ```
 
-### 2. Versioned Snapshots
-Each cycle creates:
-- **Snapshot**: Complete dataset for cold starts
-- **Delta**: Only changes since previous version
-- **Reverse Delta**: For rollback support
+### 2. AWS-backed Publisher and Announcer
 
-### 3. Filesystem Publisher
 ```kotlin
-HollowProducer.withPublisher(HollowFilesystemPublisher(hollowDataPath.toPath()))
-    .withAnnouncer(HollowFilesystemAnnouncer(hollowDataPath.toPath()))
+val config = HollowAwsConfig.builder().build()  // reads from env vars
+
+HollowProducer.withPublisher(HollowS3Publisher.create(config))
+    .withAnnouncer(HollowDynamoDBAnnouncer.create(config))
     .build()
 ```
-For production, swap with:
-- `S3Publisher` for AWS S3
-- `GCSPublisher` for Google Cloud Storage
-- Custom implementations
+
+Snapshots and deltas land in `s3://hollow-demo-blobs/movies/`. Each new version is announced atomically in DynamoDB.
+
+### 3. Consumer with Generated API
+
+```kotlin
+val consumer = HollowConsumer.withBlobRetriever(HollowS3BlobRetriever.create(config))
+    .withAnnouncementWatcher(HollowDynamoDBAnnouncementWatcher.create(config))
+    .withGeneratedAPIClass(MovieAPI::class.java)
+    .build()
+
+// Fast O(1) lookup by ID using primary key index
+val movieIndex = Movie.uniqueIndex(consumer)
+val movie = movieIndex.findMatch(id)
+```
+
+The announcement watcher polls DynamoDB every 5 seconds and triggers an async delta refresh when a new version is detected.
+
+### 4. Versioned Snapshots
+
+Each producer cycle creates:
+- **Snapshot**: Complete dataset for cold starts (`snapshot-<version>`)
+- **Delta**: Only changes since the previous version (`delta-<from>-<to>`)
+- **Reverse Delta**: For rollback support
+
+---
 
 ## 📊 Performance Metrics
 
 | Metric | Value |
 |--------|-------|
 | Initial dataset | 50,000 movies with rich metadata |
-| Snapshot size | **10 MB** (compressed binary format) |
-| Delta size | **624-668 KB** (~3.4% growth per cycle) |
-| Reverse delta | 248-266 KB (for rollback support) |
-| Compression ratio | **~17x smaller** (11 MB → 648 KB) |
-| Data generation | 50,000 movies in ~0.5 seconds |
-| Publish cycle time | ~0.95-1.4 seconds |
+| Snapshot size | ~10 MB (compressed binary format) |
+| Delta size | ~650 KB (~3.4% growth per cycle) |
+| Compression ratio | ~17x smaller than snapshot |
+| Publish cycle time | ~1–1.5 seconds |
 | Update frequency | Every 7 minutes (configurable) |
-| Manual trigger | Available via REST endpoint |
 
-**Growth Pattern (Dataset Continuously Grows):**
-- Cycle 1: 50,000 movies → 10 MB snapshot
-- Cycle 2: 51,712 movies (+3.4%) → 11 MB snapshot, 624 KB delta
-- Cycle 3: 53,483 movies (+3.4%) → 11 MB snapshot, 648 KB delta
-- Cycle 4: 55,315 movies (+3.4%) → 12 MB snapshot, 668 KB delta
+**Why deltas are so much smaller:**
 
-**Why Deltas Grow with the Dataset:**
-Each cycle simulates realistic catalog growth by **adding more content than it removes**:
-- Removes ~1.5% (750 movies)
-- Updates ~4% (2,000 movies)
-- Adds ~5% (2,500+ movies)
-- **Net growth: +3.4% per cycle**
+In each update cycle only ~10% of records change. A delta contains only those changes — unchanged records are not transmitted at all.
 
-**The Savings:**
-- **For 100 consumer instances**: 1.1 GB full reload → 64.8 MB delta (94% reduction)
-- Even with continuous growth, deltas remain **17x smaller** than snapshots
-
-## 🔧 Configuration
-
-### Producer Schedule
-Adjust update frequency in `MovieProducer.kt`:
-```kotlin
-@Scheduled(fixedDelay = 420000, initialDelay = 420000) // 7 minutes
-```
-
-### Dataset Size
-Change movie count in `MovieDataGenerator.kt`:
-```kotlin
-fun generateInitialDataset(count: Int = 50000)
-```
-
-### Force Publish Endpoint
-Trigger a producer cycle immediately without waiting:
-
-**Docker Compose:**
-```bash
-curl -X POST http://localhost:9080/producer/publish
-```
-
-**Local Development:**
-```bash
-curl -X POST http://localhost:8080/producer/publish
-```
-
-**Response:**
-```json
-{
-  "status": "success",
-  "message": "Production cycle triggered successfully",
-  "cycleCount": 3,
-  "movieCount": 50243
-}
-```
-
-### Producer Stats
-Check current producer status:
-
-**Docker Compose:**
-```bash
-curl http://localhost:9080/producer/stats
-```
-
-**Local Development:**
-```bash
-curl http://localhost:8080/producer/stats
-```
-
-## 🎯 Key Hollow Concepts Demonstrated
-
-### 1. Producer Pattern
-The `MovieProducer` runs independently from consumers:
-```kotlin
-producer.runCycle { writeState ->
-    currentMovies.forEach { movie ->
-        writeState.add(movie)  // Add ALL movies (not just changes)
-    }
-}
-// Hollow automatically calculates diffs and creates deltas
-```
-
-### 2. Consumer with Generated API
-The `MovieConsumer` uses the generated type-safe API:
-```kotlin
-// Load snapshot and watch for updates
-consumer = HollowConsumer.withBlobRetriever(blobRetriever)
-    .withAnnouncementWatcher(announcementWatcher)
-    .withGeneratedAPIClass(MovieAPI::class.java)
-    .build()
-
-// Get the API and create index
-api = consumer.getAPI(MovieAPI::class.java)
-movieIndex = org.vish.hollowdemo.api.Movie.uniqueIndex(consumer)
-
-// Fast O(1) lookup by ID using primary key index
-val movie = movieIndex.findMatch(id)
-```
-
-### 3. Separate Packages
-- **Producer** (`org.vish.hollowdemo.producer`): Publishes snapshots
-- **Consumer** (`org.vish.hollowdemo.consumer`): Consumes snapshots via generated API
-- **API** (`org.vish.hollowdemo.api`): Generated type-safe classes
-
-In production, these would typically be separate projects.
-
-## 🧹 Cleanup
-
-### Docker Compose Cleanup
-
-#### Stop and Clean Up Containers
-
-```bash
-# Stop containers (data persists in ./hollow-data)
-docker compose down
-
-# Stop containers and remove local data directory
-docker compose down && rm -rf ./hollow-data
-
-# Remove everything including images (forces rebuild on next start)
-docker compose down --rmi all && rm -rf ./hollow-data
-```
-
-#### View Data Files
-
-Since data is stored locally, you can inspect the Hollow files directly:
-
-```bash
-# List all Hollow data files
-ls -lh ./hollow-data/
-
-# View current version
-cat ./hollow-data/announced.version
-
-# Check snapshot and delta sizes
-du -h ./hollow-data/snapshot-*
-du -h ./hollow-data/delta-*
-```
+For 100 consumer instances: 1 GB full reload → 65 MB delta = **94% reduction in data transfer**.
 
 ---
-
-### Local Development Cleanup
-
-To reset the demo when running locally, use one of these methods:
-
-#### Option 1: Shell Script (Interactive)
-```bash
-./cleanup-hollow-data.sh
-```
-This script will show you the current size and ask for confirmation before deleting.
-
-#### Option 2: Gradle Task (Non-interactive)
-```bash
-./gradlew cleanupHollowData
-```
-
-#### Option 3: Manual
-```bash
-rm -rf ./hollow-data
-```
-
-After cleanup, restart the producer first, then the consumer.
-
----
-
-### What Happens After Cleanup
-
-**On restart:**
-- Producer creates a new initial snapshot (version 1)
-- All previous versions and deltas are gone
-- Consumers will load the new snapshot from scratch
-
-**Important Notes:**
-- Data is stored in `./hollow-data` on your local machine
-- The directory persists after `docker compose down` for easy inspection
-- You can manually delete `./hollow-data` to reset the demo
-- In production, deleting blob storage would cause consumer outages
-- Always ensure consumers are stopped or have a migration plan before removing published data
-
-## 🔗 Resources
-
-- **Hollow Documentation**: http://hollow.how
-- **GitHub**: https://github.com/Netflix/hollow
-- **Netflix Tech Blog**: http://techblog.netflix.com/2016/12/netflixoss-announcing-hollow.html
 
 ## 💡 The Big Idea
 
 Traditional caches force painful trade-offs:
-- **Cold starts**: Minutes to warm up
-- **Full reloads**: 2x memory spikes, GC pauses
-- **Incremental updates**: Complex CDC infrastructure
+- **Full reloads**: 2x memory spikes, GC pauses, minutes of downtime
+- **Incremental updates**: Complex CDC pipelines to build and maintain
 
 Hollow treats datasets like Git treats code:
 - **Snapshot**: Complete state at a point in time
-- **Delta**: Only the changes
-- **Immutable**: Versions never change
-- **Efficient**: Transfer & apply only differences
+- **Delta**: Only the changes between versions
+- **Immutable**: Versions never mutate in place
+- **Efficient**: Transfer and apply only what changed
 
-Perfect for: 1GB-10GB datasets, read-heavy workloads, multiple application instances.
+Perfect for: 1 GB–10 GB datasets, read-heavy workloads, many application instances.
 
 ---
 
-**Built with**: Spring Boot 3.5.7 • Kotlin 1.9.25 • Hollow 7.1.0 • Java 21
+## 🔗 Resources
+
+- **Hollow Documentation**: https://hollow.how
+- **Hollow GitHub**: https://github.com/Netflix/hollow
+- **hollow-aws library**: https://github.com/vichu/hollow-infra-adapters
+
+---
+
+**Built with**: Spring Boot 3.5.7 • Kotlin 1.9.25 • Hollow 7.14.39 • hollow-aws 0.1.0 • Java 21
