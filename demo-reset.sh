@@ -31,7 +31,9 @@ fi
 : "${HOLLOW_AWS_REGION:?HOLLOW_AWS_REGION is not set}"
 : "${HOLLOW_AWS_BUCKET:?HOLLOW_AWS_BUCKET is not set}"
 : "${HOLLOW_AWS_DYNAMODB_TABLE:?HOLLOW_AWS_DYNAMODB_TABLE is not set}"
-: "${HOLLOW_AWS_DATASET_ID:=movies}"
+
+# Two independent datasets in the current architecture
+DATASETS=("catalog" "users")
 
 AWS_ARGS=(--region "$HOLLOW_AWS_REGION")
 
@@ -57,13 +59,15 @@ if [ "$TEARDOWN" = true ]; then
   exit 0
 fi
 
-echo "==> Clearing S3 blobs under s3://${HOLLOW_AWS_BUCKET}/${HOLLOW_AWS_DATASET_ID}/"
-aws "${AWS_ARGS[@]}" s3 rm "s3://${HOLLOW_AWS_BUCKET}/${HOLLOW_AWS_DATASET_ID}/" --recursive || true
+for dataset in "${DATASETS[@]}"; do
+  echo "==> Clearing S3 blobs under s3://${HOLLOW_AWS_BUCKET}/${dataset}/"
+  aws "${AWS_ARGS[@]}" s3 rm "s3://${HOLLOW_AWS_BUCKET}/${dataset}/" --recursive || true
 
-echo "==> Deleting DynamoDB announcement for dataset '${HOLLOW_AWS_DATASET_ID}'..."
-aws "${AWS_ARGS[@]}" dynamodb delete-item \
-  --table-name "$HOLLOW_AWS_DYNAMODB_TABLE" \
-  --key "{\"dataset_id\": {\"S\": \"${HOLLOW_AWS_DATASET_ID}\"}}" || true
+  echo "==> Deleting DynamoDB announcement for dataset '${dataset}'..."
+  aws "${AWS_ARGS[@]}" dynamodb delete-item \
+    --table-name "$HOLLOW_AWS_DYNAMODB_TABLE" \
+    --key "{\"dataset_id\": {\"S\": \"${dataset}\"}}" || true
+done
 
 echo "==> Demo data cleared. AWS infrastructure (S3 bucket, DynamoDB table) is intact."
 
