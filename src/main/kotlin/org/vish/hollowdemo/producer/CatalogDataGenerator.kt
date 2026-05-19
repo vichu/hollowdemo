@@ -1,11 +1,16 @@
 package org.vish.hollowdemo.producer
 
+import org.springframework.beans.factory.annotation.Value
 import org.springframework.stereotype.Component
 import org.vish.hollowdemo.model.Movie
-import kotlin.random.Random
 
 @Component
-class MovieDataGenerator {
+class CatalogDataGenerator(
+    @Value("\${hollow.catalog.movie-count:50000}") val movieCount: Int
+) {
+    companion object {
+        private const val SEED = 99L
+    }
 
     private val genres = listOf(
         "Action", "Comedy", "Drama", "Thriller", "Sci-Fi",
@@ -77,7 +82,6 @@ class MovieDataGenerator {
         "Independent Spirit Award"
     )
 
-    // Real Netflix hits mixed with humorous variations
     private val famousNetflixMovies = listOf(
         "The Irishman" to "Drama",
         "Bird Box" to "Horror",
@@ -139,34 +143,32 @@ class MovieDataGenerator {
 
     private var currentId = 1L
     private val usedMovies = mutableSetOf<String>()
+    private var random = kotlin.random.Random(SEED)
 
-    fun generateInitialDataset(count: Int = 50000): List<Movie> {
+    fun generateInitialDataset(count: Int = movieCount): List<Movie> {
         usedMovies.clear()
         currentId = 1L
+        random = kotlin.random.Random(SEED)
 
-        // Use all famous movies first
         val movies = mutableListOf<Movie>()
         famousNetflixMovies.forEach { (title, genre) ->
             movies.add(createMovie(title, genre))
             usedMovies.add(title)
         }
 
-        // Fill remaining with numbered variations for unique titles at scale
         var attemptCount = 0
         while (movies.size < count && attemptCount < count * 2) {
-            val (baseTitle, genre) = famousNetflixMovies.random()
-            val title = if (Random.nextDouble() < 0.5) {
-                // Create variation with suffix
-                generateVariation(baseTitle, genre).title
+            val (baseTitle, genre) = famousNetflixMovies[random.nextInt(famousNetflixMovies.size)]
+            val title = if (random.nextDouble() < 0.5) {
+                variationTitle(baseTitle)
             } else {
-                // Create numbered title for guaranteed uniqueness
                 "$baseTitle ${movies.size + 1}"
             }
 
             if (title !in usedMovies) {
                 movies.add(createMovie(title, genre))
                 usedMovies.add(title)
-                attemptCount = 0  // Reset counter on success
+                attemptCount = 0
             } else {
                 attemptCount++
             }
@@ -177,9 +179,7 @@ class MovieDataGenerator {
 
     fun generateUpdatedDataset(existingMovies: List<Movie>): List<Movie> {
         val movies = existingMovies.toMutableList()
-        val random = Random.Default
 
-        // Remove 1-2% of movies (some Netflix originals don't make it...)
         val removeCount = (movies.size * 0.015).toInt().coerceAtLeast(1)
         repeat(removeCount) {
             if (movies.isNotEmpty()) {
@@ -188,13 +188,11 @@ class MovieDataGenerator {
             }
         }
 
-        // Update 3-5% of movies (ratings change as people watch)
         val updateCount = (movies.size * 0.04).toInt()
         repeat(updateCount) {
             if (movies.isNotEmpty()) {
                 val index = random.nextInt(movies.size)
                 val movie = movies[index]
-                // Rating changes by +/- 0.5
                 val ratingChange = random.nextDouble() - 0.5
                 movies[index] = movie.copy(
                     rating = (movie.rating + ratingChange).coerceIn(5.0, 10.0)
@@ -202,15 +200,13 @@ class MovieDataGenerator {
             }
         }
 
-        // Add MORE movies than we removed (dataset grows over time!)
-        // Add 4-6% new movies to ensure net growth (Netflix keeps shipping!)
         val addCount = (movies.size * 0.05).toInt().coerceAtLeast(removeCount + 50)
         var addedCount = 0
         var attemptCount = 0
         while (addedCount < addCount && attemptCount < addCount * 2) {
-            val (baseTitle, genre) = famousNetflixMovies.random()
-            val title = if (Random.nextDouble() < 0.3) {
-                generateVariation(baseTitle, genre).title
+            val (baseTitle, genre) = famousNetflixMovies[random.nextInt(famousNetflixMovies.size)]
+            val title = if (random.nextDouble() < 0.3) {
+                variationTitle(baseTitle)
             } else {
                 "$baseTitle ${currentId + 1000000}"
             }
@@ -230,28 +226,30 @@ class MovieDataGenerator {
 
     private fun createMovie(title: String, genre: String): Movie {
         val id = currentId++
-        val rating = (Random.nextDouble() * 3 + 6).coerceIn(5.0, 10.0) // 6-9 rating (Netflix quality!)
-        val releaseYear = Random.nextInt(2016, 2025)
+        val rating = (random.nextDouble() * 3 + 6).coerceIn(5.0, 10.0)
+        val releaseYear = 2016 + random.nextInt(9)
         val duration = when (genre) {
-            "Animation" -> Random.nextInt(90, 120)
-            "Drama" -> Random.nextInt(120, 180)
-            "Action" -> Random.nextInt(100, 150)
-            else -> Random.nextInt(90, 130)
+            "Animation" -> 90 + random.nextInt(30)
+            "Drama" -> 120 + random.nextInt(60)
+            "Action" -> 100 + random.nextInt(50)
+            else -> 90 + random.nextInt(40)
         }
 
-        // Generate rich metadata
         val description = generateDescription(title, genre)
-        val director = directors.random()
-        val cast = actors.shuffled().take(Random.nextInt(3, 8))
-        val writerList = writers.shuffled().take(Random.nextInt(1, 3))
-        val productionCompany = productionCompanies.random()
-        val country = countries.random()
-        val language = languages.random()
-        val budget = Random.nextLong(5_000_000, 200_000_000)
-        val boxOffice = (budget * Random.nextDouble(0.5, 5.0)).toLong()
-        val movieTags = tags.shuffled().take(Random.nextInt(2, 5))
-        val ageRating = ageRatings.random()
-        val movieAwards = if (Random.nextDouble() < 0.3) awards.random() else "None"
+        val director = directors[random.nextInt(directors.size)]
+        val castSize = 3 + random.nextInt(5)
+        val cast = actors.shuffled(random).take(castSize)
+        val writerCount = 1 + random.nextInt(2)
+        val writerList = writers.shuffled(random).take(writerCount)
+        val productionCompany = productionCompanies[random.nextInt(productionCompanies.size)]
+        val country = countries[random.nextInt(countries.size)]
+        val language = languages[random.nextInt(languages.size)]
+        val budget = 5_000_000L + (random.nextLong() % 195_000_000L).let { v -> if (v < 0) -v else v }
+        val boxOffice = (budget * (0.5 + random.nextDouble() * 4.5)).toLong()
+        val tagCount = 2 + random.nextInt(3)
+        val movieTags = tags.shuffled(random).take(tagCount)
+        val ageRating = ageRatings[random.nextInt(ageRatings.size)]
+        val movieAwards = if (random.nextDouble() < 0.3) awards[random.nextInt(awards.size)] else "None"
 
         return Movie(
             id = id,
@@ -330,13 +328,12 @@ class MovieDataGenerator {
         )
 
         val genreTemplates = templates[genre] ?: templates["Drama"]!!
-        return genreTemplates.random()
+        return genreTemplates[random.nextInt(genreTemplates.size)]
     }
 
-    private fun generateVariation(baseTitle: String, baseGenre: String): Movie {
-        val sequelNumbers = listOf("The Beginning", "Returns", "Reloaded", "Resurrection",
+    private fun variationTitle(baseTitle: String): String {
+        val suffixes = listOf("The Beginning", "Returns", "Reloaded", "Resurrection",
             "Evolution", "The Final Chapter", "Origins", "Legacy", "Unleashed")
-        val variation = "$baseTitle: ${sequelNumbers.random()}"
-        return createMovie(variation, baseGenre)
+        return "$baseTitle: ${suffixes[random.nextInt(suffixes.size)]}"
     }
 }

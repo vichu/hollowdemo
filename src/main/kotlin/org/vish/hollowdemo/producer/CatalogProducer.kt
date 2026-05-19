@@ -14,10 +14,10 @@ import java.time.LocalDateTime
 
 @Service
 @Profile("producer")
-class MovieProducer(
-    private val movieDataGenerator: MovieDataGenerator
+class CatalogProducer(
+    private val catalogDataGenerator: CatalogDataGenerator
 ) {
-    private val logger = LoggerFactory.getLogger(MovieProducer::class.java)
+    private val logger = LoggerFactory.getLogger(CatalogProducer::class.java)
     private lateinit var producer: HollowProducer
     private lateinit var awsConfig: HollowAwsConfig
     private var currentMovies: List<Movie> = emptyList()
@@ -25,68 +25,64 @@ class MovieProducer(
 
     @PostConstruct
     fun initialize() {
-        awsConfig = HollowAwsConfig.builder().build()
+        awsConfig = HollowAwsConfig.builder().datasetId("catalog").build()
 
         producer = HollowProducer.withPublisher(HollowS3Publisher.create(awsConfig))
             .withAnnouncer(HollowDynamoDBAnnouncer.create(awsConfig))
             .build()
 
-        logger.info("MovieProducer initialized. Publishing to S3 bucket: ${awsConfig.bucket}, DynamoDB table: ${awsConfig.dynamoDbTable}")
+        logger.info("CatalogProducer initialized. Publishing to S3 bucket: ${awsConfig.bucket}, dataset: ${awsConfig.datasetId}")
 
-        runProductionCycle()
+        runPublishCycle()
     }
 
-    @Scheduled(fixedDelay = 420000, initialDelay = 420000) // Every 7 minutes
-    fun runProductionCycle() {
+    @Scheduled(fixedDelay = 420_000, initialDelay = 420_000) // Every 7 minutes — catalog updates frequently
+    fun runPublishCycle() {
         try {
             val startTime = System.currentTimeMillis()
             cycleCount++
 
             logger.info("========================================")
-            logger.info("Starting producer cycle #$cycleCount at ${LocalDateTime.now()}")
+            logger.info("Starting catalog publish cycle #$cycleCount at ${LocalDateTime.now()}")
 
             currentMovies = if (currentMovies.isEmpty()) {
-                logger.info("Generating initial dataset...")
-                movieDataGenerator.generateInitialDataset()
+                logger.info("Generating initial catalog (deterministic, seed=99)...")
+                catalogDataGenerator.generateInitialDataset()
             } else {
-                logger.info("Generating updated dataset...")
-                movieDataGenerator.generateUpdatedDataset(currentMovies)
+                logger.info("Generating updated catalog (new releases, rating changes)...")
+                catalogDataGenerator.generateUpdatedDataset(currentMovies)
             }
 
-            logger.info("Dataset prepared: ${currentMovies.size} movies")
+            logger.info("Catalog prepared: ${currentMovies.size} movies")
 
             producer.runCycle { writeState ->
-                currentMovies.forEach { movie ->
-                    writeState.add(movie)
-                }
+                currentMovies.forEach { movie -> writeState.add(movie) }
             }
 
             val duration = System.currentTimeMillis() - startTime
-            logger.info("Producer cycle #$cycleCount completed in ${duration}ms")
+            logger.info("Catalog publish cycle #$cycleCount completed in ${duration}ms")
             logger.info("Published ${currentMovies.size} movies to s3://${awsConfig.bucket}/${awsConfig.keyPrefix}")
             logger.info("========================================")
 
         } catch (e: Exception) {
-            logger.error("Error during producer cycle", e)
+            logger.error("Error during catalog publish cycle", e)
         }
     }
 
-    fun getCurrentStats(): Map<String, Any> {
-        return mapOf(
-            "cycleCount" to cycleCount,
-            "movieCount" to currentMovies.size,
-            "s3Bucket" to awsConfig.bucket,
-            "dynamoDbTable" to awsConfig.dynamoDbTable,
-            "datasetId" to awsConfig.datasetId
-        )
-    }
+    fun getCurrentStats(): Map<String, Any> = mapOf(
+        "cycleCount" to cycleCount,
+        "movieCount" to currentMovies.size,
+        "s3Bucket" to awsConfig.bucket,
+        "dynamoDbTable" to awsConfig.dynamoDbTable,
+        "datasetId" to awsConfig.datasetId
+    )
 
     fun forcePublish(): Map<String, Any> {
-        logger.info("Force publish triggered manually")
-        runProductionCycle()
+        logger.info("Catalog force-publish triggered manually")
+        runPublishCycle()
         return mapOf(
             "status" to "success",
-            "message" to "Production cycle triggered successfully",
+            "message" to "Catalog publish cycle triggered",
             "cycleCount" to cycleCount,
             "movieCount" to currentMovies.size
         )

@@ -35,6 +35,9 @@ dependencies {
     implementation 'com.netflix.hollow:hollow:7.14.39'
     implementation 'io.github.vichu.hollow:hollow-aws:0.1.0'
 
+    // Deterministic fake data generation for demo datasets
+    implementation 'net.datafaker:datafaker:2.4.2'
+
     developmentOnly 'org.springframework.boot:spring-boot-devtools'
     annotationProcessor 'org.springframework.boot:spring-boot-configuration-processor'
     testImplementation 'org.springframework.boot:spring-boot-starter-test'
@@ -57,11 +60,35 @@ springBoot {
     mainClass = 'org.vish.hollowdemo.HollowdemoApplicationKt'
 }
 
-// Task to generate Hollow Consumer API
+// Task to generate Hollow Consumer API for the catalog (movies) dataset
 task generateHollowAPI(type: JavaExec) {
     group = 'hollow'
-    description = 'Generate Hollow Consumer API classes'
+    description = 'Generate Hollow Consumer API classes for catalog dataset'
     mainClass = 'org.vish.hollowdemo.codegen.GenerateMovieAPI'
+    classpath = sourceSets.main.runtimeClasspath
+    dependsOn classes
+}
+
+// Task to generate Hollow Consumer API for the users dataset
+task generateUserAPI(type: JavaExec) {
+    group = 'hollow'
+    description = 'Generate Hollow Consumer API classes for users dataset'
+    mainClass = 'org.vish.hollowdemo.codegen.GenerateUserAPI'
+    classpath = sourceSets.main.runtimeClasspath
+    dependsOn classes
+}
+
+// Convenience: regenerate both APIs in one shot
+task generateAllAPIs {
+    group = 'hollow'
+    description = 'Generate Hollow Consumer API classes for all datasets'
+    dependsOn generateHollowAPI, generateUserAPI
+}
+
+task measureJsonSize(type: JavaExec) {
+    group = 'hollow'
+    description = 'Measure uncompressed and gzipped JSON size vs Hollow snapshot for both datasets'
+    mainClass = 'org.vish.hollowdemo.codegen.MeasureJsonSize'
     classpath = sourceSets.main.runtimeClasspath
     dependsOn classes
 }

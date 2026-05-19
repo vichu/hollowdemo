@@ -15,8 +15,8 @@ import java.time.LocalDateTime
 
 @Service
 @Profile("consumer")
-class MovieConsumer {
-    private val logger = LoggerFactory.getLogger(MovieConsumer::class.java)
+class CatalogConsumer {
+    private val logger = LoggerFactory.getLogger(CatalogConsumer::class.java)
     private lateinit var consumer: HollowConsumer
     private lateinit var api: MovieAPI
     private lateinit var awsConfig: HollowAwsConfig
@@ -30,10 +30,10 @@ class MovieConsumer {
     @PostConstruct
     fun initialize() {
         logger.info("========================================")
-        logger.info("Initializing MovieConsumer...")
+        logger.info("Initializing CatalogConsumer...")
 
-        awsConfig = HollowAwsConfig.builder().build()
-        logger.info("Watching S3 bucket: ${awsConfig.bucket}, DynamoDB table: ${awsConfig.dynamoDbTable}")
+        awsConfig = HollowAwsConfig.builder().datasetId("catalog").build()
+        logger.info("Watching catalog dataset — S3: ${awsConfig.bucket}, DynamoDB: ${awsConfig.dynamoDbTable}")
 
         val blobRetriever = HollowS3BlobRetriever.create(awsConfig)
         val announcementWatcher = HollowDynamoDBAnnouncementWatcher.create(awsConfig)
@@ -43,36 +43,23 @@ class MovieConsumer {
             .withGeneratedAPIClass(MovieAPI::class.java)
             .withRefreshListener(object : HollowConsumer.RefreshListener {
                 override fun refreshStarted(currentVersion: Long, requestedVersion: Long) {
-                    logger.info("🔄 Update started: v$currentVersion -> v$requestedVersion")
+                    logger.info("🔄 Catalog update started: v$currentVersion -> v$requestedVersion")
                 }
 
                 override fun refreshSuccessful(beforeVersion: Long, afterVersion: Long, requestedVersion: Long) {
                     updateCount++
                     lastUpdateTime = LocalDateTime.now()
-
                     logger.info("========================================")
-                    logger.info("✅ Update successful: v$beforeVersion -> v$afterVersion")
-                    logger.info("   Update #$updateCount completed")
-                    logger.info("   Last updated: $lastUpdateTime")
+                    logger.info("✅ Catalog updated: v$beforeVersion -> v$afterVersion (update #$updateCount)")
                     logger.info("========================================")
                 }
 
                 override fun refreshFailed(beforeVersion: Long, afterVersion: Long, requestedVersion: Long, failureCause: Throwable?) {
-                    logger.error("❌ Update failed: v$beforeVersion -> v$afterVersion", failureCause)
+                    logger.error("❌ Catalog update failed: v$beforeVersion -> v$afterVersion", failureCause)
                 }
 
-                override fun snapshotUpdateOccurred(
-                    api: com.netflix.hollow.api.custom.HollowAPI?,
-                    stateEngine: com.netflix.hollow.core.read.engine.HollowReadStateEngine?,
-                    version: Long
-                ) {}
-
-                override fun deltaUpdateOccurred(
-                    api: com.netflix.hollow.api.custom.HollowAPI?,
-                    stateEngine: com.netflix.hollow.core.read.engine.HollowReadStateEngine?,
-                    version: Long
-                ) {}
-
+                override fun snapshotUpdateOccurred(api: com.netflix.hollow.api.custom.HollowAPI?, stateEngine: com.netflix.hollow.core.read.engine.HollowReadStateEngine?, version: Long) {}
+                override fun deltaUpdateOccurred(api: com.netflix.hollow.api.custom.HollowAPI?, stateEngine: com.netflix.hollow.core.read.engine.HollowReadStateEngine?, version: Long) {}
                 override fun blobLoaded(transition: HollowConsumer.Blob?) {}
             })
             .build()
@@ -80,24 +67,21 @@ class MovieConsumer {
         consumer.triggerRefresh()
 
         api = consumer.getAPI(MovieAPI::class.java)
-
         movieIndex = org.vish.hollowdemo.api.Movie.uniqueIndex(consumer)
-
         genreIndex = HashIndex.from(consumer, org.vish.hollowdemo.api.Movie::class.java)
             .usingBean(GenreQuery::class.java)
         consumer.addRefreshListener(genreIndex)
 
         lastUpdateTime = LocalDateTime.now()
 
-        logger.info("MovieConsumer initialized successfully")
-        logger.info("Current version: ${consumer.currentVersionId}")
-        logger.info("Primary key index created for ID lookups (O(1))")
-        logger.info("Genre hash index created for efficient genre queries")
+        logger.info("CatalogConsumer initialized — version: ${consumer.currentVersionId}")
+        logger.info("O(1) movie-by-ID index ready")
+        logger.info("Genre hash index ready")
         logger.info("========================================")
     }
 
-    private fun convertToModelMovie(hollowMovie: org.vish.hollowdemo.api.Movie): org.vish.hollowdemo.model.Movie {
-        return org.vish.hollowdemo.model.Movie(
+    private fun convertToModel(hollowMovie: org.vish.hollowdemo.api.Movie): org.vish.hollowdemo.model.Movie =
+        org.vish.hollowdemo.model.Movie(
             id = hollowMovie.id,
             title = hollowMovie.title?.value ?: "",
             genre = hollowMovie.genre?.value ?: "",
@@ -117,38 +101,27 @@ class MovieConsumer {
             ageRating = hollowMovie.ageRating?.value ?: "",
             awards = hollowMovie.awards?.value ?: ""
         )
-    }
 
-    fun getAllMovies(): List<org.vish.hollowdemo.model.Movie> {
-        return api.allMovie.map { convertToModelMovie(it) }.toList()
-    }
+    fun getAllMovies(): List<org.vish.hollowdemo.model.Movie> =
+        api.allMovie.map { convertToModel(it) }.toList()
 
-    fun getMovieById(id: Long): org.vish.hollowdemo.model.Movie? {
-        val hollowMovie = movieIndex.findMatch(id) ?: return null
-        return convertToModelMovie(hollowMovie)
-    }
+    fun getMovieById(id: Long): org.vish.hollowdemo.model.Movie? =
+        movieIndex.findMatch(id)?.let { convertToModel(it) }
 
-    fun searchByTitle(titleFragment: String): List<org.vish.hollowdemo.model.Movie> {
-        return getAllMovies().filter {
-            it.title.contains(titleFragment, ignoreCase = true)
-        }
-    }
+    fun searchByTitle(titleFragment: String): List<org.vish.hollowdemo.model.Movie> =
+        getAllMovies().filter { it.title.contains(titleFragment, ignoreCase = true) }
 
-    fun getMoviesByGenre(genre: String): List<org.vish.hollowdemo.model.Movie> {
-        val query = GenreQuery(genre)
-        return genreIndex.findMatches(query).map { convertToModelMovie(it) }.toList()
-    }
+    fun getMoviesByGenre(genre: String): List<org.vish.hollowdemo.model.Movie> =
+        genreIndex.findMatches(GenreQuery(genre)).map { convertToModel(it) }.toList()
 
     fun getStats(): Map<String, Any> {
         val movies = getAllMovies()
-        val genreCounts = movies.groupingBy { it.genre }.eachCount()
-
         return mapOf(
             "totalMovies" to movies.size,
             "currentVersion" to consumer.currentVersionId,
             "lastUpdateTime" to (lastUpdateTime?.toString() ?: "N/A"),
             "updateCount" to updateCount,
-            "genreBreakdown" to genreCounts,
+            "genreBreakdown" to movies.groupingBy { it.genre }.eachCount(),
             "averageRating" to String.format("%.2f", movies.map { it.rating }.average()),
             "s3Bucket" to awsConfig.bucket,
             "dynamoDbTable" to awsConfig.dynamoDbTable,
