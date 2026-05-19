@@ -10,16 +10,19 @@ import org.springframework.web.bind.annotation.RestController
 @RequestMapping("/producer")
 @Profile("producer")
 class ProducerController(
-    private val movieProducer: MovieProducer
+    private val catalogProducer: CatalogProducer,
+    private val userProducer: UserProducer
 ) {
 
     @GetMapping("/stats")
-    fun getStats(): Map<String, Any> {
-        return movieProducer.getCurrentStats()
-    }
+    fun getStats(): Map<String, Any> = mapOf(
+        "catalog" to catalogProducer.getCurrentStats(),
+        "users" to userProducer.getCurrentStats()
+    )
 
-    @PostMapping("/publish")
-    fun forcePublish(): Map<String, Any> {
-        return movieProducer.forcePublish()
-    }
+    @PostMapping("/catalog/publish")
+    fun forceCatalogPublish(): Map<String, Any> = catalogProducer.forcePublish()
+
+    @PostMapping("/users/publish")
+    fun forceUserPublish(): Map<String, Any> = userProducer.forcePublish()
 }

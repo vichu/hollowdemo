@@ -1,275 +1,256 @@
-# Hollow Demo - Versioned Dataset Distribution
+# Hollow Demo — Two-Dataset Streaming Platform
 
-Demo application showcasing [Netflix Hollow](https://hollow.how), an open-source library that enables efficient distribution of GB-scale datasets using a Git-like snapshot + delta model.
+Demo application showcasing [Netflix Hollow](https://hollow.how), an open-source library for distributing large read-only datasets in memory across a service fleet using a snapshot + delta model.
 
-This demo uses real AWS infrastructure (S3 + DynamoDB) via the [hollow-aws](https://github.com/vichu/hollow-infra-adapters) library.
-
----
-
-## 📋 What This Demo Shows
-
-1. **Producer**: Generates a rich movie catalog (50,000 movies) and publishes versioned snapshots + deltas to S3
-2. **Efficient Updates**: Snapshots are ~10 MB, but deltas are only ~650 KB — showcasing massive transfer savings
-3. **AWS-backed distribution**: Producer announces versions via DynamoDB; consumers poll and auto-apply deltas
-4. **Auto-Scheduling**: Producer runs every 7 minutes, simulating real-world updates
-5. **Force Publish**: Manual trigger endpoint to publish on demand without waiting
+Measured live against AWS (S3 + DynamoDB). Full numbers in [`demo-facts.md`](./demo-facts.md).
 
 ---
 
-## 🏗️ Prerequisites
+## The Problem
 
-- Docker and Docker Compose
-- [Terraform](https://developer.hashicorp.com/terraform/install) >= 1.0
-- AWS account with an IAM user (not root) and `AdministratorAccess` policy
-- AWS CLI configured: `aws configure --profile vish-personal-aws`
+A streaming platform needs to answer two questions millions of times per second:
+
+- *What movies are available right now?*
+- *What has this user been watching?*
+
+Querying a database on every request collapses under that load. Aggressive caching fights cache invalidation. Data replication fights consistency.
+
+**Hollow** distributes your entire dataset as a read-only, in-memory snapshot to every service instance. No database hop. No cache miss. Every read is a local memory lookup.
 
 ---
 
-## 🚀 Demo Runbook
+## Architecture
 
-### Step 1 — Provision AWS Infrastructure
+Two independent Hollow datasets, each with its own producer and update cadence:
 
-From the [hollow-infra-adapters](https://github.com/vichu/hollow-infra-adapters) repo:
+| Dataset | Records | Update cadence | Storage |
+|---|---|---|---|
+| **Catalog** | 50,000 movies | Every 7 minutes | `s3://.../catalog/` |
+| **Users** | 350,000 profiles | Every 10 minutes | `s3://.../users/` |
 
-```bash
-cd /path/to/hollow-infra-adapters/terraform/aws
+Each producer publishes blobs to **S3** and announces new versions to **DynamoDB**. Consumers poll DynamoDB every 5 seconds and stream only the **delta** — not a full reload.
 
-cat > terraform.tfvars <<EOF
-namespace   = "hollow"
-environment = "demo"
-region      = "us-east-1"
-
-tags = {
-  Project = "hollowdemo"
-  Owner   = "vish"
-}
-EOF
-
-terraform init && terraform apply
+```
+Producer (catalog)          S3 bucket                Consumer (fleet)
+──────────────────    ──────────────────────────    ────────────────────
+generateInitial()  →  catalog/snapshot-v1           triggerRefresh() →
+generateUpdated()  →  catalog/delta-v1-v2      →    DELTA applied in 25ms
+                      catalog/reversedelta-v2-v1
+                      users/snapshot-v1
+                      users/delta-v1-v2
 ```
 
-This creates 11 resources in ~60 seconds:
-- **S3 bucket**: `hollow-demo-blobs` — stores snapshots and deltas
-- **DynamoDB table**: `hollow-demo-announcements` — stores latest version per dataset
-- **IAM roles**: `hollow-demo-hollow-producer` and `hollow-demo-hollow-consumer`
+The interesting endpoint is the **cross-dataset join**:
 
-### Step 2 — Configure Credentials
-
-Create a `.env` file in this project (gitignored):
-
-```bash
-cat > .env <<EOF
-HOLLOW_AWS_REGION=us-east-1
-HOLLOW_AWS_BUCKET=hollow-demo-blobs
-HOLLOW_AWS_DYNAMODB_TABLE=hollow-demo-announcements
-HOLLOW_AWS_DATASET_ID=movies
-AWS_ACCESS_KEY_ID=<your-iam-user-access-key>
-AWS_SECRET_ACCESS_KEY=<your-iam-user-secret-key>
-EOF
+```
+GET /users/{userId}/recently-watched
+  1. Look up user   in the users   snapshot  → O(1), local memory
+  2. Look up movies in the catalog snapshot  → O(1) per ID, local memory
+  3. Return enriched results                 → no database, no network
 ```
 
-### Step 3 — Start the Demo
+Two independent datasets, two different update cadences, joined in memory at query time. This is the pattern Netflix uses at scale.
 
-```bash
-./demo-reset.sh
+---
+
+## Measured Numbers
+
+Numbers from a live AWS run. Reproduce with `./gradlew measureJsonSize`.
+
+### Wire & heap comparison
+
+| Format | Catalog (50K movies) | Users (350K users) | Combined |
+|---|---|---|---|
+| JSON uncompressed | 31.1 MB | 74.6 MB | **105.7 MB** |
+| JSON gzipped | 4.4 MB | 24.4 MB | **28.8 MB** |
+| **POJO heap after deserialize** | **69.7 MB** | **218.5 MB** | **288 MB** |
+| Hollow snapshot (S3) | 10.4 MB | 24.7 MB | **35.1 MB** |
+| **Hollow heap (live)** | **11.4 MB** | **24.6 MB** | **35.9 MB** |
+
+**POJO heap is 8× larger than Hollow heap for the same data.**
+
+### The delta advantage
+
+| What | Size |
+|---|---|
+| Full catalog snapshot | 10.4 MB |
+| **Catalog delta (one 7-min cycle)** | **620 KB** |
+| Reverse delta (rollback) | 249 KB |
+| Consumer delta apply time | **25–41 ms** |
+
+At 100 consumer instances, each catalog refresh cycle costs **62 MB** of egress (delta × 100) vs **3.1 GB** if you were broadcasting JSON.
+
+### Consumer startup (cold boot)
+
+| Event | Time |
+|---|---|
+| Catalog snapshot load + index build | 1.3 s |
+| Users snapshot load + index build | 2.4 s |
+| Full Spring Boot startup (both datasets) | **5.7 s** |
+
+After startup, all updates are deltas — no restart, no full reload, no memory spike.
+
+---
+
+## The Gzip Trap
+
+The instinctive objection: *"We already gzip our API responses, so the wire size is fine."*
+
+That's true for the wire. It misses what happens next.
+
+```
+Wire:       28.8 MB  (gzipped)
+              ↓  GZIPInputStream
+JSON text:  105.7 MB
+              ↓  Jackson deserializer
+JVM heap:   288 MB   ← this is what your service actually pays
 ```
 
-This builds the containers and starts both producer and consumer fresh.
+When Jackson deserializes into Java objects, it allocates one object per record. For each `Movie`: object header, 12 `String` fields (each its own heap allocation with char array), 3 `ArrayList` fields (wrapper + backing array + individual `String` objects per element). For each `User`: every `Long` in `recentlyWatchedMovieIds` becomes a **boxed object** — 16 bytes instead of 8 — multiplied across 350,000 users × 10 watch history entries = 3.5 million extra objects.
 
-### Step 4 — Access the APIs
+Hollow holds the same data in 36 MB because its binary format uses packed arrays: all movie titles share a single ordinal-indexed string pool, list fields are offset ranges into flat arrays, numeric fields stay as primitives.
 
-**Producer (port 9080):**
-```bash
-curl http://localhost:9080/producer/stats
-curl -X POST http://localhost:9080/producer/publish   # Force a new cycle
-```
+> *Gzip is transport compression. Hollow is heap compression. They solve different problems, and only one of them matters once the data is live in your service.*
 
-**Consumer (port 9081):**
-```bash
-curl http://localhost:9081/movies
-curl http://localhost:9081/movies/1
-curl http://localhost:9081/movies/search?title=Glass
-curl http://localhost:9081/movies/genre/Action
-curl http://localhost:9081/movies/stats
-```
+---
 
-### Step 5 — Verify in AWS
+## Running the Demo
+
+### Prerequisites
+
+- Java 21
+- AWS credentials with access to S3 and DynamoDB
+- An S3 bucket and DynamoDB table (see setup below)
+
+### AWS Setup
 
 ```bash
-# S3 — see snapshots and deltas
-aws s3 ls s3://hollow-demo-blobs/movies/ --human-readable
+# Create the S3 bucket
+aws s3 mb s3://YOUR-BUCKET-NAME --region us-east-1
 
-# DynamoDB — see the latest announced version
-aws dynamodb get-item \
-  --table-name hollow-demo-announcements \
-  --key '{"dataset_id": {"S": "movies"}}' \
+# Create the DynamoDB table
+aws dynamodb create-table \
+  --table-name YOUR-TABLE-NAME \
+  --attribute-definitions AttributeName=dataset_id,AttributeType=S \
+  --key-schema AttributeName=dataset_id,KeyType=HASH \
+  --billing-mode PAY_PER_REQUEST \
   --region us-east-1
 ```
 
----
-
-## 🔄 Resetting Between Demo Runs
-
-To start completely fresh while keeping AWS infrastructure intact:
+### Environment Variables
 
 ```bash
-./demo-reset.sh
+export HOLLOW_AWS_REGION=us-east-1
+export HOLLOW_AWS_BUCKET=your-bucket-name
+export HOLLOW_AWS_DYNAMODB_TABLE=your-table-name
+
+# AWS credentials (or use an IAM role / instance profile)
+export AWS_ACCESS_KEY_ID=...
+export AWS_SECRET_ACCESS_KEY=...
 ```
 
-This stops containers, wipes S3 blobs and the DynamoDB version record, then rebuilds and restarts everything.
-
----
-
-## 🧹 Full Teardown (After Demo)
-
-To tear down everything including AWS infrastructure:
+### Start the Producer
 
 ```bash
-./demo-reset.sh --teardown
+SPRING_PROFILES_ACTIVE=producer ./gradlew bootRun
 ```
 
-This stops containers, then destroys all 11 Terraform resources.
+On startup the producer generates and publishes:
+1. **Catalog snapshot** — 50,000 movies, ~3s, ~10.4 MB to S3
+2. **Users snapshot** — 350,000 users, ~4.5s, ~24.7 MB to S3
 
-> **Note on S3 versioning**: The Terraform module enables S3 bucket versioning, which means `aws s3 rm` only creates delete markers — it does not remove the underlying object versions. Terraform will refuse to delete a bucket that still has versions in it. The `--teardown` flag handles this automatically: it uses `s3api delete-objects` to purge all object versions and delete markers before handing off to `terraform destroy`.
+Then runs on schedule: catalog every 7 minutes (delta ~620 KB), users every 10 minutes.
 
-### Summary of `demo-reset.sh` flags
+### Start the Consumer (separate terminal)
 
-| Command | What it does |
-|---|---|
-| `./demo-reset.sh` | Stop → clear data → rebuild → start |
-| `./demo-reset.sh --clean-only` | Stop → clear data (don't restart) |
-| `./demo-reset.sh --teardown` | Stop → purge all S3 versions → destroy Terraform infra |
-
----
-
-## 🎬 Dataset
-
-The demo generates 50,000 movies with rich metadata including title, genre, rating, release year, duration, description, director, cast, writers, production company, budget, box office, tags, age rating, and awards.
-
-Each cycle simulates real-world changes: ~1.5% removals, ~4% updates (rating changes), ~5% new additions — net growth of ~3.4% per cycle.
-
----
-
-## 🏗️ Project Structure
-
+```bash
+SPRING_PROFILES_ACTIVE=consumer java -jar build/libs/hollowdemo-*.jar --server.port=8081
 ```
-src/main/
-├── java/org/vish/hollowdemo/
-│   ├── api/                        # Generated Hollow Consumer API (do not edit!)
-│   │   ├── MovieAPI.java           # Main API class
-│   │   ├── Movie.java              # Type-safe Movie wrapper
-│   │   └── ...                     # Other generated classes
-│   └── codegen/
-│       └── GenerateMovieAPI.java   # API generator utility
-│
-└── kotlin/org/vish/hollowdemo/
-    ├── model/
-    │   └── Movie.kt                # Data model with @HollowPrimaryKey
-    ├── producer/
-    │   ├── MovieDataGenerator.kt   # Generates sample movie data
-    │   ├── MovieProducer.kt        # Publishes snapshots/deltas to S3
-    │   └── ProducerController.kt   # REST endpoints for producer
-    ├── consumer/
-    │   ├── MovieConsumer.kt        # Loads from S3, watches DynamoDB for updates
-    │   ├── MovieController.kt      # REST API endpoints
-    │   └── GenreQuery.kt           # Hash index query bean
-    └── HollowdemoApplication.kt    # Spring Boot entry point
+
+### API Endpoints
+
+**Producer** (port 8080):
+
+```bash
+GET  /producer/stats            # cycle counts, record counts, S3 bucket info
+POST /producer/catalog/publish  # force a catalog publish cycle
+POST /producer/users/publish    # force a users publish cycle
+```
+
+**Consumer** (port 8081):
+
+```bash
+GET /movies/{id}                      # O(1) movie lookup by ID
+GET /movies/genre/{genre}             # genre index lookup
+GET /movies/stats                     # snapshot version, record count
+
+GET /users/{userId}                   # O(1) user lookup by UUID
+GET /users/{userId}/recently-watched  # cross-dataset join demo
+GET /users/stats                      # plan distribution across 350K users
+```
+
+### Docker Compose
+
+```bash
+cp .env.example .env   # fill in your AWS values
+docker compose up --build
 ```
 
 ---
 
-## 🎯 Key Hollow Concepts Demonstrated
+## Running Tests
 
-### 1. Producer Pattern
+The full produce → consume → delta → join pipeline runs without any AWS credentials:
 
-The producer adds all movies every cycle — Hollow automatically calculates the diff:
-
-```kotlin
-producer.runCycle { writeState ->
-    currentMovies.forEach { movie ->
-        writeState.add(movie)  // Add ALL movies (not just changes)
-    }
-}
-// Hollow diffs against the previous state and creates a delta automatically
+```bash
+./gradlew test
 ```
 
-### 2. AWS-backed Publisher and Announcer
+`HollowFilesystemIntegrationTest` uses `HollowFilesystemPublisher` / `HollowFilesystemBlobRetriever` with temp directories. Swap one constructor argument and you're talking to S3. The application code is unchanged — that's Hollow's storage abstraction at work.
 
-```kotlin
-val config = HollowAwsConfig.builder().build()  // reads from env vars
+Tests cover:
+- Snapshot record counts for both datasets
+- O(1) primary key lookup (movie by ID, user by UUID)
+- Cross-dataset join correctness (recently-watched IDs resolve to full Movie objects)
+- Determinism (same seed always produces identical datasets)
+- Delta file is smaller than snapshot after second produce cycle
 
-HollowProducer.withPublisher(HollowS3Publisher.create(config))
-    .withAnnouncer(HollowDynamoDBAnnouncer.create(config))
-    .build()
+---
+
+## Gradle Tasks
+
+```bash
+./gradlew test                  # run all tests (no AWS needed)
+./gradlew measureJsonSize       # compare JSON vs Hollow sizes + POJO heap
+./gradlew generateHollowAPI     # regenerate Hollow consumer API for catalog
+./gradlew generateUserAPI       # regenerate Hollow consumer API for users
+./gradlew generateAllAPIs       # regenerate both
 ```
 
-Snapshots and deltas land in `s3://hollow-demo-blobs/movies/`. Each new version is announced atomically in DynamoDB.
+### First-time setup — codegen required
 
-### 3. Consumer with Generated API
+The Hollow consumer API classes (`src/main/java/.../api/` and `src/main/java/.../api/users/`) are generated from the data model and are **not committed to the repository**. You must generate them before building or running tests:
 
-```kotlin
-val consumer = HollowConsumer.withBlobRetriever(HollowS3BlobRetriever.create(config))
-    .withAnnouncementWatcher(HollowDynamoDBAnnouncementWatcher.create(config))
-    .withGeneratedAPIClass(MovieAPI::class.java)
-    .build()
-
-// Fast O(1) lookup by ID using primary key index
-val movieIndex = Movie.uniqueIndex(consumer)
-val movie = movieIndex.findMatch(id)
+```bash
+./gradlew generateAllAPIs
 ```
 
-The announcement watcher polls DynamoDB every 5 seconds and triggers an async delta refresh when a new version is detected.
-
-### 4. Versioned Snapshots
-
-Each producer cycle creates:
-- **Snapshot**: Complete dataset for cold starts (`snapshot-<version>`)
-- **Delta**: Only changes since the previous version (`delta-<from>-<to>`)
-- **Reverse Delta**: For rollback support
+Re-run this any time you change `Movie.kt` or `User.kt`. The generator reads the model, writes the Java consumer API, and the normal build picks it up from there.
 
 ---
 
-## 📊 Performance Metrics
+## Stack
 
-| Metric | Value |
-|--------|-------|
-| Initial dataset | 50,000 movies with rich metadata |
-| Snapshot size | ~10 MB (compressed binary format) |
-| Delta size | ~650 KB (~3.4% growth per cycle) |
-| Compression ratio | ~17x smaller than snapshot |
-| Publish cycle time | ~1–1.5 seconds |
-| Update frequency | Every 7 minutes (configurable) |
-
-**Why deltas are so much smaller:**
-
-In each update cycle only ~10% of records change. A delta contains only those changes — unchanged records are not transmitted at all.
-
-For 100 consumer instances: 1 GB full reload → 65 MB delta = **94% reduction in data transfer**.
+- **Spring Boot 3.5.7** — application framework
+- **Kotlin 1.9.25** + **Java 21** — language / runtime
+- **Netflix Hollow 7.14.39** — dataset distribution
+- **hollow-aws 0.1.0** — S3 publisher + DynamoDB announcer/watcher
+- **Datafaker 2.4.2** — deterministic fake data generation (seed = 42)
 
 ---
 
-## 💡 The Big Idea
+## Resources
 
-Traditional caches force painful trade-offs:
-- **Full reloads**: 2x memory spikes, GC pauses, minutes of downtime
-- **Incremental updates**: Complex CDC pipelines to build and maintain
-
-Hollow treats datasets like Git treats code:
-- **Snapshot**: Complete state at a point in time
-- **Delta**: Only the changes between versions
-- **Immutable**: Versions never mutate in place
-- **Efficient**: Transfer and apply only what changed
-
-Perfect for: 1 GB–10 GB datasets, read-heavy workloads, many application instances.
-
----
-
-## 🔗 Resources
-
-- **Hollow Documentation**: https://hollow.how
-- **Hollow GitHub**: https://github.com/Netflix/hollow
-- **hollow-aws library**: https://github.com/vichu/hollow-infra-adapters
-
----
-
-**Built with**: Spring Boot 3.5.7 • Kotlin 1.9.25 • Hollow 7.14.39 • hollow-aws 0.1.0 • Java 21
+- [Hollow Documentation](https://hollow.how)
+- [Netflix OSS announcement](https://netflixtechblog.com/netflixoss-announcing-hollow-9f12e9b64a7e)
+- [hollow-aws library](https://github.com/vichu/hollow-aws)
