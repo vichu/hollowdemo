@@ -48,3 +48,6 @@ hollow-data/
 
 ### Hollow generated API classes (regenerate with: ./gradlew generateAllAPIs) ###
 src/main/java/org/vish/hollowdemo/api/
+
+### Presentation ###
+presentation/node_modules/
