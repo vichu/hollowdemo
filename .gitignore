@@ -46,6 +46,7 @@ hollow-data/
 .claude/
 .env
 
+
 ### Hollow generated API classes (regenerate with: ./gradlew generateAllAPIs) ###
 src/main/java/org/vish/hollowdemo/api/
 

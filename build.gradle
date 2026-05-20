@@ -19,6 +19,9 @@ configurations {
     compileOnly {
         extendsFrom annotationProcessor
     }
+    // codegen source set inherits all runtime deps (hollow, kotlin-reflect, etc.)
+    codegenImplementation.extendsFrom implementation
+    codegenRuntimeOnly.extendsFrom runtimeOnly
 }
 
 repositories {
@@ -45,6 +48,22 @@ dependencies {
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
 
+// codegen source set: model classes (Movie, User) + generator runners.
+// Compiled independently so generators can run before the main source set,
+// breaking the cycle: main needs generated API → generators need model classes.
+sourceSets {
+    codegen {
+        kotlin { srcDir 'src/codegen/kotlin' }
+        java { srcDir 'src/codegen/java' }
+    }
+    main {
+        // Model classes (Movie, User) live in codegen; add to main's classpath
+        // so producers, controllers, and tests can reference them normally.
+        compileClasspath += sourceSets.codegen.output
+        runtimeClasspath += sourceSets.codegen.output
+    }
+}
+
 kotlin {
     compilerOptions {
         freeCompilerArgs.addAll '-Xjsr305=strict'
@@ -60,22 +79,23 @@ springBoot {
     mainClass = 'org.vish.hollowdemo.HollowdemoApplicationKt'
 }
 
-// Task to generate Hollow Consumer API for the catalog (movies) dataset
+// Generate Hollow Consumer API for the catalog (movies) dataset.
+// Depends only on codegenClasses — avoids the circular dependency on classes.
 task generateHollowAPI(type: JavaExec) {
     group = 'hollow'
     description = 'Generate Hollow Consumer API classes for catalog dataset'
     mainClass = 'org.vish.hollowdemo.codegen.GenerateMovieAPI'
-    classpath = sourceSets.main.runtimeClasspath
-    dependsOn classes
+    classpath = sourceSets.codegen.runtimeClasspath
+    dependsOn codegenClasses
 }
 
-// Task to generate Hollow Consumer API for the users dataset
+// Generate Hollow Consumer API for the users dataset.
 task generateUserAPI(type: JavaExec) {
     group = 'hollow'
     description = 'Generate Hollow Consumer API classes for users dataset'
     mainClass = 'org.vish.hollowdemo.codegen.GenerateUserAPI'
-    classpath = sourceSets.main.runtimeClasspath
-    dependsOn classes
+    classpath = sourceSets.codegen.runtimeClasspath
+    dependsOn codegenClasses
 }
 
 // Convenience: regenerate both APIs in one shot
@@ -84,6 +104,10 @@ task generateAllAPIs {
     description = 'Generate Hollow Consumer API classes for all datasets'
     dependsOn generateHollowAPI, generateUserAPI
 }
+
+// Main compilation depends on generated API being present first.
+compileKotlin.dependsOn generateAllAPIs
+compileJava.dependsOn generateAllAPIs
 
 task measureJsonSize(type: JavaExec) {
     group = 'hollow'
